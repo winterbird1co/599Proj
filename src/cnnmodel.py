@@ -6,7 +6,6 @@ class CNNModel(nn.Module):
     def __init__(self, channels: int, img_shape, activation=nn.ReLU()) -> None:
         super(CNNModel, self).__init__()
         base = 32
-        size = img_shape
 
         def layer_block(in_layer, out_layer, batchnorm=True):
             block = [nn.Conv2d(in_layer,out_layer,3,2,1,bias=not batchnorm)]
@@ -28,10 +27,8 @@ class CNNModel(nn.Module):
         )
 
         self.linear = nn.Sequential(
-            nn.Linear(in_features=base*8, out_features=base*4),
-            activation,
-            nn.Dropout(0.3),
-            nn.Linear(in_features=base*4, out_features=1)
+            nn.LazyLinear(out_features=1),
+            nn.Softmax()
         )
 
     def forward(self,x):
