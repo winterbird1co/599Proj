@@ -13,6 +13,7 @@ from torchvision.transforms import InterpolationMode
 from torch.utils.data import DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+lambda_ = [20,4,8]
 
 class GANProject(nn.Module):
     def __init__(self, load_unet=None, load_cnn=None, load_branch=None, img_size:int = 128, debug:bool = False, small:bool = False, lambd:float = 0.2, activation=nn.ReLU(), alternative=None) -> None:
@@ -56,12 +57,19 @@ class GANProject(nn.Module):
         self.discriminator = self.discriminator.to(device)
         
         if load_branch is None:
-            self.encoder = unetmodel.Encoder(3, activation).to(device)
+            if small:
+                self.encoder = unetmodel.Encoder(3, activation).to(device)
+            else:
+                self.encoder = unetmodel.Encoder2(3, activation).to(device)
         else:
             self.encoder = load_branch.to(device)
-        self.opt_Gen = torch.optim.Adam(self.generator.parameters(), lr=0.002)
-        self.opt_Dsc = torch.optim.Adam(self.discriminator.parameters(), lr=0.002)
-        self.opt_Enc = torch.optim.Adam(self.discriminator.parameters(), lr=0.002)
+
+        beta = (0.5,0.999)
+        self.opt_Gen = torch.optim.Adam(self.generator.parameters(), lr=0.0005, betas=beta)
+        self.opt_Dsc = torch.optim.Adam(self.discriminator.parameters(), lr=0.0005, betas=beta)
+        self.opt_Enc = torch.optim.Adam(self.discriminator.parameters(), lr=0.0005, betas=beta)
+
+        self.criterion = nn.BCELoss()
     
     def train_model(self, trainLoader: DataLoader, validLoader: DataLoader, metric:str='loss', epochs:int = 10, previous:int = 0, eps:float = 0.01):
 
@@ -110,7 +118,7 @@ class GANProject(nn.Module):
 
         for img, _ in trainLoader:
             img_real = img.to(device)
-            img_noise = torch.randn_like(img, device=device) * 0.3 + img_real
+            img_noise = torch.randn_like(img, device=device) * 0.2 + img_real
             img_fake = self.generator(img_noise)
 
             # Image Reconstruction Loss
@@ -123,33 +131,36 @@ class GANProject(nn.Module):
             # Adversarial Learning Loss
             self.discriminator.zero_grad()
             
-            d_loss = self.dsc_loss(img_real, img_fake)
-            d_loss.backward()
+            r_loss, f_loss = self.dsc_loss(img_real, img_fake)
+            r_loss.backward()
+            f_loss.backward()
             self.opt_Dsc.step()
 
             # Encoding Consistency Loss
             self.encoder.zero_grad()
 
-            ec1,ec2,ec3,ed1 = self.encoder(img_fake.detach())
-            gc1,gc2,gc3,gd1 = self.generator.encoder_forward(img_noise)
+            ec1,ec2,ec3,ecf,ed1 = self.encoder(img_fake.detach())
+            gc1,gc2,gc3,gcf,gd1 = self.generator.encoder(img_real)
 
-            ec_loss = self.ec_loss(ed1=ed1, gd1=gd1.detach())
+            ec_loss = self.ec_loss(ed1=ed1, gd1=gd1)
             ec_loss.backward()
             self.opt_Enc.step()
 
             # Feature Map Consistency Loss
-            system_loss = self.feature_loss(ec1=ec1.detach(), ec2=ec2.detach(), ec3=ec3.detach(), gc1=gc1, gc2=gc2, gc3=gc3)
+            system_loss = self.feature_loss(ec1=ec1.detach(), ec2=ec2.detach(), ec3=ec3.detach(), ecf=ecf, gc1=gc1, gc2=gc2, gc3=gc3, gcf=gcf)
             system_loss.backward()
             self.opt_Gen.step()
 
             #t_metrics['rec_loss'] += r_metrics['rec_loss']
             #t_metrics['gen_loss'] += r_metrics['gen_loss']
             t_metrics['rec_loss'] += rec_loss
-            t_metrics['d_loss'] += d_loss
+            t_metrics['d_loss'] += r_loss + f_loss
+            t_metrics['ec_loss'] += ec_loss
             t_metrics['feature_loss'] += system_loss
 
         t_metrics['rec_loss'] = t_metrics['rec_loss'].item() / ((len(trainLoader.dataset)) / trainLoader.batch_size)
         t_metrics['d_loss'] = t_metrics['d_loss'].item() / ((len(trainLoader.dataset)) / trainLoader.batch_size)
+        t_metrics['ec_loss'] = t_metrics['ec_loss'].item() / ((len(trainLoader.dataset)) / trainLoader.batch_size)
         t_metrics['feature_loss'] = t_metrics['feature_loss'].item() / ((len(trainLoader.dataset)) / trainLoader.batch_size)
         return t_metrics
     
@@ -163,20 +174,20 @@ class GANProject(nn.Module):
             for img, label in loader:
                 real_img = img.to(device)
                 fake_img = self.generator(real_img)
-                _,_,_,gd1 = self.generator.encoder_forward(real_img)
-                _,_,_,ed1 = self.encoder(fake_img.detach())
+                _,_,_,_,gd1 = self.generator.encoder(real_img)
+                _,_,_,_,ed1 = self.encoder(fake_img.detach())
                 label = label.to(device)
 
                 term1 = F.l1_loss(fake_img, real_img)
                 term2 = (1 - self.discriminator(fake_img))
                 term3 = F.mse_loss(ed1, gd1) 
-                d_loss = self.dsc_loss(real_img, fake_img)
-                result = F.normalize(term1 * lambds[0] + term2 * lambds[1] + term3 * lambds[2]).flatten()
+                r_loss, f_loss = self.dsc_loss(real_img, fake_img)
+                result = F.normalize(term1 * lambda_[0] + term2 * lambda_[1] + term3 * lambda_[2]).flatten()
 
                 total += img.size(0)
                 v_metrics['rec_loss'] += term1
                 v_metrics['ec_loss'] += term3
-                v_metrics['d_loss'] += d_loss
+                v_metrics['d_loss'] += r_loss + f_loss
                 v_metrics['accuracy'] += result.sum()
 
         v_metrics['rec_loss'] = v_metrics['rec_loss'].item() / ((len(loader.dataset)) / loader.batch_size)
@@ -187,31 +198,40 @@ class GANProject(nn.Module):
     
     def singleton(self, img):
         img_real = img.to(device)
-        img_noise = torch.randn_like(img, device=device) * 0.5 + img_real
+        img_noise = torch.randn_like(img, device=device) * 0.3 + img_real
         img_fake = self.generator(img_noise)
-        
-        self.generator.zero_grad()
-        self.encoder.zero_grad()
 
-        rec_loss = self.gen_loss(img_real, img_fake)
+        # Image Reconstruction Loss
+        self.generator.zero_grad()
+
+        rec_loss = F.l1_loss(img_fake, img_real)
         rec_loss.backward()
         self.opt_Gen.step()
+
+        # Adversarial Learning Loss
+        self.discriminator.zero_grad()
+        
+        r_loss, f_loss = self.dsc_loss(img_real, img_fake)
+        r_loss.backward()
+        f_loss.backward()
+        self.opt_Dsc.step()
+
+        # Encoding Consistency Loss
+        self.encoder.zero_grad()
 
         ec1,ec2,ec3,ed1 = self.encoder(img_fake.detach())
         gc1,gc2,gc3,gd1 = self.generator.encoder_forward(img_noise)
 
-        system_loss = self.feature_loss(ec1=ec1, ec2=ec2, ec3=ec3, gc1=gc1, gc2=gc2, gc3=gc3) + self.ec_loss(ed1=ed1, gd1=gd1)
-        system_loss.backward()
+        ec_loss = self.ec_loss(ed1=ed1, gd1=gd1.detach())
+        ec_loss.backward()
         self.opt_Enc.step()
+
+        # Feature Map Consistency Loss
+        system_loss = self.feature_loss(ec1=ec1.detach(), ec2=ec2.detach(), ec3=ec3.detach(), gc1=gc1, gc2=gc2, gc3=gc3)
+        system_loss.backward()
         self.opt_Gen.step()
 
-        self.discriminator.zero_grad()
-        
-        d_loss = self.dsc_loss(img_real, img_fake)
-        d_loss.backward()
-        self.opt_Dsc.step()
-
-        return system_loss, rec_loss, d_loss
+        return system_loss, rec_loss, r_loss+f_loss
 
     def gen_loss(self, x_real: torch.Tensor, x_fake: torch.Tensor, lambd: float=0.2):
 
@@ -230,14 +250,12 @@ class GANProject(nn.Module):
 
         pred_r = self.discriminator(x_real)
         pred_f = self.discriminator(x_fake.detach())
+        one_like = torch.ones_like(pred_r, device=device)
 
-        y_r = torch.ones_like(pred_f, device=device)
-        y_f = torch.zeros_like(pred_r, device=device)
+        r_loss = F.binary_cross_entropy_with_logits(pred_r, one_like)
+        f_loss = F.binary_cross_entropy_with_logits(pred_f, one_like)
 
-        r_loss = F.binary_cross_entropy_with_logits(pred_r, y_r)
-        f_loss = F.binary_cross_entropy_with_logits(pred_f, y_f)
-
-        return r_loss + f_loss
+        return r_loss, f_loss
     
     def gen_Wloss(self, x_real: torch.Tensor, x_fake: torch.Tensor, lambd: float) -> dict:
 
@@ -259,20 +277,15 @@ class GANProject(nn.Module):
 
         return wd_loss
     
-    def feature_loss(self, ec1, ec2, ec3, gc1, gc2, gc3, lambds=[0.2,0.4,0.6]):
-        layer1_loss = F.mse_loss(gc1, ec1) * lambds[0]
-        layer2_loss = F.mse_loss(gc2, ec2) * lambds[1]
-        layer3_loss = F.mse_loss(gc3, ec3) * lambds[2]
+    def feature_loss(self, ec1, ec2, ec3, ecf, gc1, gc2, gc3, gcf, lambds=lambda_):
+        #layer0_loss = F.mse_loss(gc1, ec1.detach())
+        layer1_loss = F.mse_loss(gc2, ec2.detach()) * lambds[0]
+        layer2_loss = F.mse_loss(gc3, ec3.detach()) * lambds[1]
+        layer3_loss = F.mse_loss(gcf, ecf.detach()) * lambds[2]
         return layer1_loss + layer2_loss + layer3_loss
     
     def ec_loss (self, ed1, gd1):
-        return F.mse_loss(gd1.detach(), ed1)
-
-    def gaussian(self, img:torch.Tensor, stddev=0.2):
-        if self.training:
-            noise = torch.randn_like(img) * stddev
-            return img + noise
-        return img
+        return F.mse_loss(ed1, gd1.detach())
 
     def stat_report(self, gen_loss, dsc_loss, epoch, batch, deltatime) -> None:
         print(f"Epoch {epoch}, batch {batch}; Losses = G:{gen_loss:<10.4f} vs. D:{dsc_loss:<10.4f}; time: {deltatime:<10.1f} sec")

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
+from unetmodel import Encoder
 
 class CNNModel(nn.Module):
     def __init__(self, channels: int, img_shape, activation=nn.ReLU()) -> None:
@@ -36,6 +37,13 @@ class CNNModel(nn.Module):
         out = out.view(out.shape[0], -1)
         return self.linear(out)
     
-class AlexModel(nn.Module):
-    def __init__(self):
-        None
+class EC_Discriminator(nn.Module):
+    def __init__(self, channels: int, activation=nn.ReLU()) -> None:
+        super(EC_Discriminator, self).__init__()
+        base = 32
+
+        self.model = Encoder(channels, activation)
+        self.translate = nn.Sequential(
+            nn.LazyLinear(out_features=1),
+            nn.Softmax()
+        )
