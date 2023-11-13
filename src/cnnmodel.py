@@ -24,12 +24,10 @@ class CNNModel(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=1),
             *layer_block(base*4, base*4),
             *layer_block(base*4, base*8),
-            nn.MaxPool2d(kernel_size=2, stride=1),
         )
 
         self.linear = nn.Sequential(
-            nn.LazyLinear(out_features=1),
-            nn.Softmax()
+            nn.LazyLinear(out_features=1)
         )
 
     def forward(self,x):
@@ -40,10 +38,13 @@ class CNNModel(nn.Module):
 class EC_Discriminator(nn.Module):
     def __init__(self, channels: int, activation=nn.ReLU()) -> None:
         super(EC_Discriminator, self).__init__()
-        base = 32
+        base = 48
 
         self.model = Encoder(channels, activation)
         self.translate = nn.Sequential(
-            nn.LazyLinear(out_features=1),
-            nn.Softmax()
+            nn.Linear(in_features=11, out_features=1)
         )
+
+    def forward(self,X):
+        _,_,_,_,X = self.model(X)
+        return self.translate(X)

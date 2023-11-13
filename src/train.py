@@ -51,6 +51,8 @@ class GANProject(nn.Module):
                 # Small and extremely fast computation, 3.5M, 0.3 GLOPs
                 self.discriminator = models.shufflenet_v2_x1_5()
                 self.discriminator.fc = nn.Linear(in_features=1024, out_features=1, bias=True)
+            elif alternative == "encoder":
+                self.discriminator = cnnmodel.EC_Discriminator(3, activation)
         else:
             self.discriminator = load_cnn
 
@@ -98,15 +100,15 @@ class GANProject(nn.Module):
             print('Validation: ', v_metrics)
 
             if v_metrics['rec_loss'] < best_metric and t_metrics['rec_loss'] < 0.2:
-                torch.save(self.generator, f"genproject_e{epoch+previous}.pt")
-                torch.save(self.discriminator, f"dscproject_e{epoch+previous}.pt")
-                torch.save(self.encoder, f'brcproject_e{epoch+previous}.pt')
+                torch.save(self.generator, f"Models/genproject_e{epoch+previous}.pt")
+                torch.save(self.discriminator, f"Models/dscproject_e{epoch+previous}.pt")
+                torch.save(self.encoder, f'Models/brcproject_e{epoch+previous}.pt')
                 best_metric = v_metrics['rec_loss']
 
         if best_metric == 0.05:
-            torch.save(self.generator, f"genproject_e{epoch+previous}.pt")
-            torch.save(self.discriminator, f"dscproject_e{epoch+previous}.pt")
-            torch.save(self.encoder, f'brcproject_e{epoch+previous}.pt')
+            torch.save(self.generator, f"Models/genproject_e{epoch+previous}.pt")
+            torch.save(self.discriminator, f"Models/dscproject_e{epoch+previous}.pt")
+            torch.save(self.encoder, f'Models/brcproject_e{epoch+previous}.pt')
             print("Target metric not reached. Saving intermediate.")
     
     def ganTrain_epoch(self, trainLoader: DataLoader):
@@ -279,16 +281,22 @@ class GANProject(nn.Module):
     
     def feature_loss(self, ec1, ec2, ec3, ecf, gc1, gc2, gc3, gcf, lambds=lambda_):
         #layer0_loss = F.mse_loss(gc1, ec1.detach())
-        layer1_loss = F.mse_loss(gc2, ec2.detach()) * lambds[0]
-        layer2_loss = F.mse_loss(gc3, ec3.detach()) * lambds[1]
-        layer3_loss = F.mse_loss(gcf, ecf.detach()) * lambds[2]
-        return layer1_loss + layer2_loss + layer3_loss
+        layer1_loss = F.mse_loss(gc1, ec1.detach()) * lambds[0]
+        layer2_loss = F.mse_loss(gc2, ec2.detach()) * lambds[1]
+        layer3_loss = F.mse_loss(gc3, ec3.detach()) * lambds[2]
+        layerf_loss = F.mse_loss(gcf, ecf.detach())
+        return layer1_loss + layer2_loss + layer3_loss + layerf_loss
     
     def ec_loss (self, ed1, gd1):
         return F.mse_loss(ed1, gd1.detach())
 
     def stat_report(self, gen_loss, dsc_loss, epoch, batch, deltatime) -> None:
         print(f"Epoch {epoch}, batch {batch}; Losses = G:{gen_loss:<10.4f} vs. D:{dsc_loss:<10.4f}; time: {deltatime:<10.1f} sec")
+
+    def force_save(self, epoch):
+        torch.save(self.generator, f"Models/genproject_e{epoch}.pt")
+        torch.save(self.discriminator, f"Models/dscproject_e{epoch}.pt")
+        torch.save(self.encoder, f'Models/brcproject_e{epoch}.pt')
 
 class ForestFireDataset(ImageFolder):
     def __init__(self, root: str, transform: Callable[..., Any] | None = None, target_transform: Callable[..., Any] | None = None, loader: Callable[[str], Any] = ..., is_valid_file: Callable[[str], bool] | None = None):

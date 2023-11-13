@@ -5,7 +5,7 @@ from torch import Tensor
 from torchvision.transforms.v2.functional import center_crop
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-f_thickness = 48
+f_thickness = 64
 
 class UNetBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, activation=nn.ReLU(inplace=True), batchnorm:bool = True, ksp_param=(4,1,0)):
