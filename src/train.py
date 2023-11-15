@@ -3,6 +3,8 @@ from typing import Any, Callable, Tuple
 
 import cnnmodel
 import unetmodel
+import Novelty_Model
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,18 +15,20 @@ from torchvision.transforms import InterpolationMode
 from torch.utils.data import DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-lambda_ = [20,4,8]
+lambda_ = [20,4,1]
 
 class GANProject(nn.Module):
-    def __init__(self, load_unet=None, load_cnn=None, load_branch=None, img_size:int = 128, debug:bool = False, small:bool = False, lambd:float = 0.2, activation=nn.ReLU(), alternative=None) -> None:
+    def __init__(self, load_unet=None, load_cnn=None, load_branch=None, img_size:int = 128, debug:bool = False, lambd:float = 0.2, activation=nn.ReLU(), select_D="default", select_G="default", no_encoder:bool=False) -> None:
         super(GANProject, self).__init__()
 
         self.img_size = img_size
         self.debug = debug
         self.lambd = lambd
         if load_unet is None:
-            if small:
+            if select_G == "default":
                 self.generator = unetmodel.UNetAutoSmall(3, activation)
+            elif select_G == "novelty":
+                self.generator = Novelty_Model.R_Net(skip=True, cat=False, n_channels=48, kernel_size=4)
             else:
                 self.generator = unetmodel.UNetAuto(3, activation)
         else:
@@ -33,38 +37,42 @@ class GANProject(nn.Module):
         self.generator = self.generator.to(device)
         
         if load_cnn is None:
-            if alternative is None:
+            if select_D == "default":
                 self.discriminator = cnnmodel.CNNModel(3, img_size, activation)
-            elif alternative == "efficientnet":
+            elif select_D == "efficientnet":
                 # Computational Speed is slow, but high performance. 5.3M Params 0.39 GLOPs
                 self.discriminator = models.efficientnet_b0()
                 self.discriminator.classifier[1] = nn.Linear(in_features=1280, out_features=1, bias=True)
-            elif alternative == "shufflenet_s":
+            elif select_D == "shufflenet_s":
                 # Small and extremely fast computation, 1.4M, 0.04 GLOPs
                 self.discriminator = models.shufflenet_v2_x0_5()
                 self.discriminator.fc = nn.Linear(in_features=1024, out_features=1, bias=True)
-            elif alternative == "shufflenet_m":
+            elif select_D == "shufflenet_m":
                 # Small and extremely fast computation, 2.3M, 0.14 GLOPs
                 self.discriminator = models.shufflenet_v2_x1_0()
                 self.discriminator.fc = nn.Linear(in_features=1024, out_features=1, bias=True)
-            elif alternative == "shufflenet_l":
+            elif select_D == "shufflenet_l":
                 # Small and extremely fast computation, 3.5M, 0.3 GLOPs
                 self.discriminator = models.shufflenet_v2_x1_5()
                 self.discriminator.fc = nn.Linear(in_features=1024, out_features=1, bias=True)
-            elif alternative == "encoder":
+            elif select_D == "novelty":
+                self.discriminator = Novelty_Model.D_Net(in_resolution=(img_size, img_size), n_channels=48, kernel_size=4)
+            elif select_D == "encoder":
                 self.discriminator = cnnmodel.EC_Discriminator(3, activation)
         else:
             self.discriminator = load_cnn
 
         self.discriminator = self.discriminator.to(device)
         
-        if load_branch is None:
-            if small:
+        if load_branch is None and not no_encoder:
+            if select_G == "default":
                 self.encoder = unetmodel.Encoder(3, activation).to(device)
             else:
                 self.encoder = unetmodel.Encoder2(3, activation).to(device)
-        else:
+        elif not no_encoder:
             self.encoder = load_branch.to(device)
+        else:
+            self.encoder = None
 
         beta = (0.5,0.999)
         self.opt_Gen = torch.optim.Adam(self.generator.parameters(), lr=0.0005, betas=beta)
@@ -82,24 +90,30 @@ class GANProject(nn.Module):
         
         for epoch in range(epochs):
             start = time.time()
-            t_metrics = self.ganTrain_epoch(trainLoader)
-            v_metrics = self.evaluate(validLoader)
+            if self.encoder is None:
+                t_metrics = self.train_epoch_noencoder(trainLoader)
+                v_metrics = self.evaluate_noencoder(validLoader)
+            else:
+                t_metrics = self.train_epoch(trainLoader)
+                v_metrics = self.evaluate(validLoader)
             delta_t = time.time() - start
 
             metrics['train']['rec_loss'].append(t_metrics['rec_loss'])
             metrics['train']['d_loss'].append(t_metrics['d_loss'])
-            metrics['train']['f_loss'].append(t_metrics['feature_loss'])
-            metrics['train']['ec_loss'].append(t_metrics['ec_loss'])
             metrics['valid']['rec_loss'].append(v_metrics['rec_loss'])
             metrics['valid']['d_loss'].append(v_metrics['d_loss'])
-            metrics['valid']['ec_loss'].append(v_metrics['ec_loss'])
             metrics['valid']['accuracy'].append(v_metrics['accuracy'])
+
+            if self.encoder is not None:
+                metrics['train']['f_loss'].append(t_metrics['feature_loss'])
+                metrics['train']['ec_loss'].append(t_metrics['ec_loss'])
+                metrics['valid']['ec_loss'].append(v_metrics['ec_loss'])
 
             print(f'Epoch {epoch+previous} Time: {delta_t:.2f}s')
             print('Train: ', t_metrics)
             print('Validation: ', v_metrics)
 
-            if v_metrics['rec_loss'] < best_metric and t_metrics['rec_loss'] < 0.2:
+            if v_metrics['rec_loss'] < best_metric and t_metrics['rec_loss'] < 0.05:
                 torch.save(self.generator, f"Models/genproject_e{epoch+previous}.pt")
                 torch.save(self.discriminator, f"Models/dscproject_e{epoch+previous}.pt")
                 torch.save(self.encoder, f'Models/brcproject_e{epoch+previous}.pt')
@@ -111,7 +125,7 @@ class GANProject(nn.Module):
             torch.save(self.encoder, f'Models/brcproject_e{epoch+previous}.pt')
             print("Target metric not reached. Saving intermediate.")
     
-    def ganTrain_epoch(self, trainLoader: DataLoader):
+    def train_epoch(self, trainLoader: DataLoader):
         self.generator.train()
         self.discriminator.train()
         self.encoder.train()
@@ -198,6 +212,65 @@ class GANProject(nn.Module):
         v_metrics['accuracy'] = v_metrics['accuracy'].item() / ((len(loader.dataset)) / loader.batch_size)
         return v_metrics
     
+    def train_epoch_noencoder(self, trainLoader: DataLoader):
+        self.generator.train()
+        self.discriminator.train()
+
+        t_metrics = {'rec_loss' : 0, 'd_loss' : 0, 'ec_loss':0, 'feature_loss' : 0}
+
+        for img, _ in trainLoader:
+            img_real = img.to(device)
+            img_noise = torch.randn_like(img, device=device) * 0.2 + img_real
+            img_fake = self.generator(img_noise)
+
+            # Image Reconstruction Loss
+            self.generator.zero_grad()
+
+            rec_loss = F.l1_loss(img_fake, img_real)
+            rec_loss.backward()
+            self.opt_Gen.step()
+
+            # Adversarial Learning Loss
+            self.discriminator.zero_grad()
+            
+            r_loss, f_loss = self.dsc_loss(img_real, img_fake)
+            r_loss.backward()
+            f_loss.backward()
+            self.opt_Dsc.step()
+
+            t_metrics['rec_loss'] += rec_loss
+            t_metrics['d_loss'] += r_loss + f_loss
+
+        t_metrics['rec_loss'] = t_metrics['rec_loss'].item() / ((len(trainLoader.dataset)) / trainLoader.batch_size)
+        t_metrics['d_loss'] = t_metrics['d_loss'].item() / ((len(trainLoader.dataset)) / trainLoader.batch_size)
+        return t_metrics
+    
+    def evaluate_noencoder(self, loader: DataLoader):
+        self.generator.eval()
+        self.discriminator.eval()
+        v_metrics = {'rec_loss' : 0, 'd_loss' : 0, 'ec_loss' : 0, 'accuracy' : 0}
+        with torch.no_grad():
+            total = 0
+            for img, label in loader:
+                real_img = img.to(device)
+                fake_img = self.generator(real_img)
+                label = label.to(device)
+
+                term1 = F.l1_loss(fake_img, real_img)
+                term2 = (1 - self.discriminator(fake_img))
+                r_loss, f_loss = self.dsc_loss(real_img, fake_img)
+                result = F.normalize(term1 * lambda_[0] + term2 * lambda_[1]).flatten()
+
+                total += img.size(0)
+                v_metrics['rec_loss'] += term1
+                v_metrics['d_loss'] += r_loss + f_loss
+                v_metrics['accuracy'] += result.sum()
+
+        v_metrics['rec_loss'] = v_metrics['rec_loss'].item() / ((len(loader.dataset)) / loader.batch_size)
+        v_metrics['d_loss'] = v_metrics['d_loss'].item() / ((len(loader.dataset)) / loader.batch_size)
+        v_metrics['accuracy'] = v_metrics['accuracy'].item() / ((len(loader.dataset)) / loader.batch_size)
+        return v_metrics
+
     def singleton(self, img):
         img_real = img.to(device)
         img_noise = torch.randn_like(img, device=device) * 0.3 + img_real
@@ -252,10 +325,10 @@ class GANProject(nn.Module):
 
         pred_r = self.discriminator(x_real)
         pred_f = self.discriminator(x_fake.detach())
-        one_like = torch.ones_like(pred_r, device=device)
+        ones_like = torch.ones_like(pred_r, device=device)
 
-        r_loss = F.binary_cross_entropy_with_logits(pred_r, one_like)
-        f_loss = F.binary_cross_entropy_with_logits(pred_f, one_like)
+        r_loss = F.binary_cross_entropy_with_logits(pred_r, ones_like)
+        f_loss = F.binary_cross_entropy_with_logits(pred_f, ones_like)
 
         return r_loss, f_loss
     
